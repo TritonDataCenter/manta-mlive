@@ -1,0 +1,26 @@
+{
+	"name": "mlive",
+	"version": "0.0.0",
+	"description": "Manta liveness tester",
+	"bin": {
+		"mlive": "bin/mlive"
+	},
+	"repository": {
+	      	"type": "git",
+	      	"url": "https://github.com/joyent/manta-mlive"
+	},
+	"keywords": [ "manta", "liveness" ],
+	"author": "Dave Pacheco <dap@joyent.com>",
+	"license": "MPL-2.0",
+	"bugs": { "url": "https://github.com/joyent/manta-mlive/issues" },
+	"homepage": "https://github.com/joyent/manta-mlive",
+	"dependencies": {
+		"assert-plus": "0.1.5",
+		"bunyan": "1.2.3",
+		"extsprintf": "1.2.1",
+		"manta": "1.4.6",
+		"posix-getopt": "1.1.0",
+		"vasync": "1.6.2",
+		"verror": "1.6.0"
+	}
+}
