@@ -8,7 +8,7 @@
  */
 
 /*
- * Copyright (c) 2014, Joyent, Inc.
+ * Copyright (c) 2017, Joyent, Inc.
  */
 
 /*
@@ -72,7 +72,7 @@ function main()
 	};
 
 	parser = new mod_getopt.BasicParser('f(force)p:(path)S(skip-setup)' +
-	    '9(help)', process.argv);
+	    's:(shards)9(help)', process.argv);
 	while ((option = parser.getopt()) !== undefined) {
 		switch (option.option) {
 		case 'f':
@@ -91,6 +91,14 @@ function main()
 			if (option.optarg.charAt(0) != '/')
 				usage('not a valid path: "%s"', option.optarg);
 			args.ml_paths.push(option.optarg);
+			break;
+
+		case 's':
+			args.ml_nshards = parseInt(option.optarg, 10);
+			if (isNaN(args.ml_nshards) || args.ml_nshards <= 0) {
+				usage('unsupported number of shards: "%s"',
+				    args.ml_nshards);
+			}
 			break;
 
 		default:
@@ -138,12 +146,20 @@ function usage()
 	}
 
 	console.error([
-	    sprintf('usage: %s [-f | --force] [-p | --path PATH] REPORT_TIME',
+	    sprintf('usage: %s [-f | --force] [-p | --path PATH] [-S] ' +
+	        '[-s | --shards NSHARDS] REPORT_INTERVAL',
 	        mlArg0),
 	    '',
 	    'Runs a small, continuous read and write load against a Manta ',
 	    'service in order to assess liveness.  Prints out when outages ',
-	    'appear to start and end on a per-second interval.'
+	    'appear to start and end, as well as a general report every ',
+	    'REPORT_INTERVAL seconds.',
+	    '',
+	    '    -f, --force       clobber content in target paths',
+	    '    -p, --path PATH   specify Manta paths to write test objects',
+	    '    -S, --skip-setup  skip initialization (must already be done)',
+	    '    -s, --shards N    create enough directories to test ',
+	    '                      N metadata shards'
 	].join('\n'));
 	process.exit(2);
 }
