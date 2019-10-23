@@ -8,7 +8,7 @@
  */
 
 /*
- * Copyright (c) 2017, Joyent, Inc.
+ * Copyright 2019 Joyent, Inc.
  */
 
 /*
@@ -404,6 +404,7 @@ LivenessTester.prototype.ensureObject = function (path, callback)
 LivenessTester.prototype.tick = function ()
 {
 	var args = this.mlt_args;
+	var log = this.mlt_manta.log;
 	var self = this;
 	var rq, method, rqargs;
 
@@ -429,15 +430,20 @@ LivenessTester.prototype.tick = function ()
 		rqargs.push(new mod_manta.StringStream('test contents'));
 	}
 
-	rqargs.push(function (err, stream) {
+	rqargs.push(function (err, arg1, arg2) {
 		var stats;
+		var res;
 
 		if (rq.kind == 'read') {
-			if (!err)
+			var stream = arg1;
+			res = arg2;
+			if (!err) {
 				/* Don't let data accumulate. */
 				stream.on('data', function () {});
+			}
 			stats = self.mlt_stats_read;
 		} else {
+			res = arg1;
 			stats = self.mlt_stats_write;
 		}
 
@@ -446,6 +452,8 @@ LivenessTester.prototype.tick = function ()
 			self.mlt_stats_report.ms_fail++;
 		} else {
 			stats.ms_ok++;
+			stats.ms_rtime += parseInt(
+			    res.headers['x-request-processing-time']);
 			self.mlt_stats_report.ms_ok++;
 		}
 
@@ -454,6 +462,10 @@ LivenessTester.prototype.tick = function ()
 
 	method.apply(this.mlt_manta, rqargs);
 };
+
+function floatdiv(a, b) {
+	return (1.0 * a) / b;
+}
 
 /*
  * Invoked on a less-frequent reporting interval (1Hz by default) to report on
@@ -493,6 +505,14 @@ LivenessTester.prototype.report = function ()
 			    this.mlt_state_last.toISOString());
 			this.mlt_state_last = now;
 			this.mlt_stats_report.clear();
+
+			fprintf(this.mlt_args.ml_output, '%s: mean latency: ' +
+			    'read %d ms, write %d ms\n', now.toISOString(),
+			    floatdiv(this.mlt_stats_read.ms_rtime,
+			        this.mlt_stats_read.ms_ok),
+			    floatdiv(this.mlt_stats_write.ms_rtime,
+			        this.mlt_stats_write.ms_ok));
+
 		}
 	} else {
 		fprintf(this.mlt_args.ml_output, '%s: reads %s, writes %s ' +
@@ -522,6 +542,7 @@ LivenessStats.prototype.clear = function ()
 {
 	this.ms_ok = 0;
 	this.ms_fail = 0;
+	this.ms_rtime = 0;
 };
 
 LivenessStats.prototype.state = function ()
