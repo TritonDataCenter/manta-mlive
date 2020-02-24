@@ -28,7 +28,7 @@ var sprintf = require('extsprintf').sprintf;
  * Directory manta requires the full path, but buckets simply uses a bucket and
  * object name.
  */
-var DEFAULT_DIRECTORY_PATH = sprintf('/%s/stor/mlive', process.env.MANTA_USER);
+var DEFAULT_DIRECTORY_PATH_FMT = '/%s/stor/mlive';
 var DEFAULT_BUCKET = 'mlive';
 
 /*
@@ -136,24 +136,6 @@ function main()
 		}
 	}
 
-	if (args.ml_test_buckets) {
-		if (paths.length === 0) {
-			paths.push(DEFAULT_BUCKET);
-		}
-
-		args.ml_buckets = paths;
-	} else {
-		if (paths.length === 0) {
-			paths.push(DEFAULT_DIRECTORY_PATH);
-		}
-
-		paths.forEach(function (p) {
-			mod_manta.assertPath(p, 'p');
-		});
-
-		args.ml_paths = paths;
-	}
-
 	if (parser.optind() === process.argv.length - 1) {
 		args.ml_report_time = parseInt(
 		    process.argv[parser.optind()], 10);
@@ -178,6 +160,29 @@ function main()
 
 	/* Bad, Manta client! */
 	process.removeAllListeners('uncaughtException');
+
+	if (args.ml_test_buckets) {
+		if (paths.length === 0) {
+			paths.push(DEFAULT_BUCKET);
+		}
+
+		args.ml_buckets = paths;
+	} else {
+		if (paths.length === 0) {
+			/*
+			 * MANTA_USER is validated above where the manta bin
+			 * client is created.
+			 */
+			paths.push(sprintf(DEFAULT_DIRECTORY_PATH_FMT,
+			    process.env.MANTA_USER));
+		}
+
+		paths.forEach(function (p) {
+			mod_manta.assertPath(p, 'p');
+		});
+
+		args.ml_paths = paths;
+	}
 
 	mlive(args);
 }
@@ -235,6 +240,9 @@ function mlive(args)
 
 	mod_assertplus.arrayOfString(args.ml_paths, 'args.ml_paths');
 	mod_assertplus.arrayOfString(args.ml_buckets, 'args.ml_buckets');
+	mod_assertplus.ok(args.ml_paths.length > 0 ||
+	    args.ml_buckets.length > 0,
+	    'args.ml_paths and args.ml_buckets empty');
 
 	manta = args.ml_manta;
 
@@ -410,13 +418,14 @@ LivenessTester.prototype.start = function ()
 	 * paths are hitting, so our only option is to use enough different
 	 * paths as to make it extremely unlikely that a given shard is
 	 * uncovered.  Shards are effectively independently randomized based on
-	 * the path, so the odds of N paths *not* covering a given shard are
+	 * the path in directory manta or the object name in buckets manta, so
+	 * the odds of N paths *not* covering a given shard are
 	 * ((nshards - 1) / nshards)^N.
 	 *
 	 * This is completely unfounded, but we're just going to use 15 paths
-	 * per shard. For 3 shards (as deployed in production), the odds of
-	 * each shard not being hit are 0.23%, so the odds of any shard not
-	 * being hit are still quite low.
+	 * or objects per shard. For 3 shards (as deployed in production), the
+	 * odds of each shard not being hit are 0.23%, so the odds of any shard
+	 * not being hit are still quite low.
 	 * */
 	for (var i = 0; i < args.ml_nshards * multiplier; i++) {
 		var name =  'mlive_' + i;
