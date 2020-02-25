@@ -6,21 +6,26 @@
 		"mlive": "bin/mlive"
 	},
 	"repository": {
-	      	"type": "git",
-	      	"url": "https://github.com/joyent/manta-mlive"
+		"type": "git",
+		"url": "https://github.com/joyent/manta-mlive"
 	},
-	"keywords": [ "manta", "liveness" ],
+	"keywords": [
+		"manta",
+		"liveness"
+	],
 	"author": "David Pacheco <dap@joyent.com>",
 	"license": "MPL-2.0",
-	"bugs": { "url": "https://github.com/joyent/manta-mlive/issues" },
+	"bugs": {
+		"url": "https://github.com/joyent/manta-mlive/issues"
+	},
 	"homepage": "https://github.com/joyent/manta-mlive",
 	"dependencies": {
 		"assert-plus": "^1.0.0",
 		"bunyan": "^1.5.1",
 		"extsprintf": "^1.3.0",
-		"manta": "^4.1.1",
+		"manta": "git://github.com/joyent/node-manta#buckets",
 		"posix-getopt": "^1.2.0",
-		"vasync": "^1.6.3",
+		"vasync": "2.2.0",
 		"verror": "^1.6.0"
 	}
 }

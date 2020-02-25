@@ -5,7 +5,7 @@
 -->
 
 <!--
-    Copyright (c) 2014, Joyent, Inc.
+    Copyright 2020 Joyent, Inc.
 -->
 
 # manta-mlive
@@ -27,11 +27,22 @@ health.
 ## Usage
 
     $ mlive --help
-    usage: mlive [-f | --force] [-p | --path PATH] REPORT_TIME
-    
-    Runs a small, continuous read and write load against a Manta 
-    service in order to assess liveness.  Prints out when outages 
-    appear to start and end on a per-second interval.
+    usage: mlive [-f | --force] [-p | --path PATH] [-S] [-s | --shards NSHARDS] REPORT_INTERVAL
+
+    Runs a small, continuous read and write load against a Manta
+    service in order to assess liveness.  Prints out when outages
+    appear to start and end, as well as a general report every
+    REPORT_INTERVAL seconds.
+
+        -b, --buckets     test buckets instead of directory manta
+        -h, --help        print this message and exit
+        -f, --force       clobber content in target paths
+        -p, --path PATH   specify Manta paths to write test objects.
+                          these are considered to be bucket names when
+                          -b is specified.
+        -S, --skip-setup  skip initialization (must already be done)
+        -s, --shards N    create enough directories to test
+                          N metadata shards
 
 Generally, you'd run mlive with one argument that specifies how many seconds
 between reports when nothing has changed.  Here's example output:
@@ -68,3 +79,30 @@ between reports when nothing has changed.  Here's example output:
     2014-12-16T17:45:29.546Z: read okay, write partial_outage (44/100 ok since 2014-12-16T17:45:22.535Z)
     2014-12-16T17:45:31.547Z: all okay (20/21 ok since 2014-12-16T17:45:29.546Z)
     2014-12-16T17:45:41.558Z: all okay (99/99 ok since 2014-12-16T17:45:31.547Z)
+
+Here's another example using buckets:
+
+    $ mlive -b 2
+    will test for liveness: reads, writes
+    assuming 3 metadata shards
+    testing: buckets
+    using buckets: mlive
+    time between requests: 50 ms
+    maximum outstanding requests: 100
+    environment:
+	MANTA_URL = https://bart:2345
+	MANTA_USER = dave
+	MANTA_KEY_ID = 35:8c:b7:b5:87:4b:35:48:93:24:4f:7c:39:56:df:f4
+	MANTA_TLS_INSECURE = true
+    creating test tree ... (45/45)
+    done.
+    took 2.245s to initialize
+    2020-02-21T22:45:06.540Z: reads okay, writes okay (16/16 ok since start)
+    2020-02-21T22:45:08.542Z: all okay (40/40 ok since 2020-02-21T22:45:06.540Z)
+    2020-02-21T22:45:10.544Z: all okay (39/39 ok since 2020-02-21T22:45:08.542Z)
+    2020-02-21T22:45:12.545Z: all okay (39/39 ok since 2020-02-21T22:45:10.544Z)
+    2020-02-21T22:45:15.546Z: all okay (60/60 ok since 2020-02-21T22:45:12.545Z)
+    2020-02-21T22:45:17.547Z: all okay (40/40 ok since 2020-02-21T22:45:15.546Z)
+    2020-02-21T22:45:19.549Z: all okay (39/39 ok since 2020-02-21T22:45:17.547Z)
+    ...
+

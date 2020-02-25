@@ -8,7 +8,7 @@
  */
 
 /*
- * Copyright (c) 2017, Joyent, Inc.
+ * Copyright 2020 Joyent, Inc.
  */
 
 /*
@@ -24,13 +24,33 @@ var mod_vasync = require('vasync');
 var VError = require('verror');
 var sprintf = require('extsprintf').sprintf;
 
+/*
+ * Directory manta requires the full path, but buckets simply uses a bucket and
+ * object name.
+ */
+var DEFAULT_DIRECTORY_PATH_FMT = '/%s/stor/mlive';
+var DEFAULT_BUCKET = 'mlive';
+
+/*
+ * Concurrency to use when initializing a directory tree or buckets setup.
+ */
+var INIT_CONCURRENCY = 10;
+
 var mlArg0 = mod_path.basename(process.argv[1]);
 
 function main()
 {
 	var args, parser, option;
 
+	var paths = [];
+
 	args = {
+	    /* whether to test buckets */
+	    'ml_test_buckets': false,
+
+	    /* buckets to read/write to */
+	    'ml_buckets': [],
+
 	    /* paths to read/write to */
 	    'ml_paths': [],
 
@@ -71,15 +91,25 @@ function main()
 	    'ml_skipsetup': null
 	};
 
-	parser = new mod_getopt.BasicParser('f(force)p:(path)S(skip-setup)' +
-	    's:(shards)9(help)', process.argv);
+	parser = new mod_getopt.BasicParser([
+		'b(buckets)',
+		'f(force)',
+		'h(help)',
+		'p:(path)',
+		's:(shards)',
+		'S(skip-setup)'
+        ].join(''), process.argv);
 	while ((option = parser.getopt()) !== undefined) {
 		switch (option.option) {
+		case 'b':
+			args.ml_test_buckets = true;
+			break;
+
 		case 'f':
 			args.ml_force = true;
 			break;
 
-		case '9':
+		case 'h':
 			usage();
 			break;
 
@@ -88,9 +118,7 @@ function main()
 			break;
 
 		case 'p':
-			if (option.optarg.charAt(0) != '/')
-				usage('not a valid path: "%s"', option.optarg);
-			args.ml_paths.push(option.optarg);
+			paths.push(option.optarg);
 			break;
 
 		case 's':
@@ -108,12 +136,7 @@ function main()
 		}
 	}
 
-	if (args.ml_paths.length === 0) {
-		args.ml_paths.push(
-		    sprintf('/%s/stor/mlive', process.env['MANTA_USER']));
-	}
-
-	if (parser.optind() == process.argv.length - 1) {
+	if (parser.optind() === process.argv.length - 1) {
 		args.ml_report_time = parseInt(
 		    process.argv[parser.optind()], 10);
 		if (isNaN(args.ml_report_time))
@@ -130,9 +153,36 @@ function main()
 	    'stream': process.stderr
 	});
 
-	args.ml_manta = mod_manta.createBinClient({ 'log': args.ml_log });
+	args.ml_manta = mod_manta.createBinClient({
+		klass: mod_manta.MantaBucketsClient,
+		log: args.ml_log
+	});
+
 	/* Bad, Manta client! */
 	process.removeAllListeners('uncaughtException');
+
+	if (args.ml_test_buckets) {
+		if (paths.length === 0) {
+			paths.push(DEFAULT_BUCKET);
+		}
+
+		args.ml_buckets = paths;
+	} else {
+		if (paths.length === 0) {
+			/*
+			 * MANTA_USER is validated above where the manta bin
+			 * client is created.
+			 */
+			paths.push(sprintf(DEFAULT_DIRECTORY_PATH_FMT,
+			    process.env.MANTA_USER));
+		}
+
+		paths.forEach(function (p) {
+			mod_manta.assertPath(p, 'p');
+		});
+
+		args.ml_paths = paths;
+	}
 
 	mlive(args);
 }
@@ -147,19 +197,23 @@ function usage()
 	}
 
 	console.error([
-	    sprintf('usage: %s [-f | --force] [-p | --path PATH] [-S] ' +
+	    sprintf('usage: %s [-f | --force] [-p | --path PATH] [-S]' +
 	        '[-s | --shards NSHARDS] REPORT_INTERVAL',
 	        mlArg0),
 	    '',
-	    'Runs a small, continuous read and write load against a Manta ',
-	    'service in order to assess liveness.  Prints out when outages ',
-	    'appear to start and end, as well as a general report every ',
+	    'Runs a small, continuous read and write load against a Manta',
+	    'service in order to assess liveness.  Prints out when outages',
+	    'appear to start and end, as well as a general report every',
 	    'REPORT_INTERVAL seconds.',
 	    '',
+	    '    -b, --buckets     test buckets instead of directory manta',
+	    '    -h, --help        print this message and exit',
 	    '    -f, --force       clobber content in target paths',
-	    '    -p, --path PATH   specify Manta paths to write test objects',
+	    '    -p, --path PATH   specify Manta paths to write test objects.',
+	    '                      these are considered to be bucket names when',
+	    '                      -b is specified.',
 	    '    -S, --skip-setup  skip initialization (must already be done)',
-	    '    -s, --shards N    create enough directories to test ',
+	    '    -s, --shards N    create enough directories to test',
 	    '                      N metadata shards'
 	].join('\n'));
 	process.exit(2);
@@ -185,14 +239,32 @@ function mlive(args)
 	var manta;
 
 	mod_assertplus.arrayOfString(args.ml_paths, 'args.ml_paths');
-	mod_assertplus.ok(args.ml_paths.length > 0, 'args.ml_paths');
+	mod_assertplus.arrayOfString(args.ml_buckets, 'args.ml_buckets');
+	mod_assertplus.ok(args.ml_paths.length > 0 ||
+	    args.ml_buckets.length > 0,
+	    'args.ml_paths and args.ml_buckets empty');
 
 	manta = args.ml_manta;
-	mod_vasync.forEachPipeline({
-	    'inputs': args.ml_paths,
-	    'func': function (path, callback) {
+
+	function ensureBucket(bucket, callback) {
+		manta.createBucket(bucket, function (err) {
+			if (err && err.message.match(/already exists$/)) {
+				callback();
+				return;
+			}
+
+			if (err) {
+				callback(err);
+				return;
+			}
+
+			callback();
+		});
+	}
+
+	function ensureDirectory(path, callback) {
 		manta.info(path, function (err, info) {
-			if (err && err.name == 'NotFoundError') {
+			if (err && err.name === 'NotFoundError') {
 				callback();
 				return;
 			}
@@ -203,7 +275,7 @@ function mlive(args)
 				return;
 			}
 
-			if (info.extension != 'directory') {
+			if (info.extension !== 'directory') {
 				if (!args.ml_force) {
 					callback(new VError('path "%s" ' +
 					    'already exists (use --force ' +
@@ -232,12 +304,28 @@ function mlive(args)
 			    'will stomp over directory at "%s"\n', path);
 			callback();
 		});
-	    }
-	}, function (err) {
-		if (err)
-			fatal(err);
+	}
 
-		new LivenessTester(args).start();
+	mod_vasync.pipeline({funcs: [
+		function handleDirectories(_, cb) {
+			mod_vasync.forEachPipeline({
+			    inputs: args.ml_paths,
+			    func: ensureDirectory
+			}, cb);
+		},
+		function handleBuckets(_, cb) {
+			mod_vasync.forEachPipeline({
+			    inputs: args.ml_buckets,
+			    func: ensureBucket
+			}, cb);
+		}
+	]}, function (err) {
+		if (err) {
+			fatal(err);
+		}
+
+		var lt = new LivenessTester(args);
+		lt.start();
 	});
 }
 
@@ -290,6 +378,7 @@ function LivenessTester(args)
 LivenessTester.prototype.start = function ()
 {
 	var args, stderr, key;
+	var started = new Date();
 	var self = this;
 
 	mod_assertplus.ok(this.mlt_requests === null,
@@ -301,44 +390,104 @@ LivenessTester.prototype.start = function ()
 	fprintf(stderr, 'will test for liveness: %s\n', args.ml_reads ?
 	    (args.ml_writes ? 'reads, writes' : 'reads') : 'writes');
 	fprintf(stderr, 'assuming %d metadata shards\n', args.ml_nshards);
-	fprintf(stderr, 'using base paths: %s\n', args.ml_paths.join(', '));
+	fprintf(stderr, 'testing: %s\n', args.ml_test_buckets ? 'buckets' :
+	    'directory manta');
+	if (args.ml_test_buckets) {
+		fprintf(stderr, 'using buckets: %s\n',
+		    args.ml_buckets.join(', '));
+	} else {
+		fprintf(stderr, 'using base paths: %s\n',
+		    args.ml_paths.join(', '));
+	}
 	fprintf(stderr, 'time between requests: %d ms\n', args.ml_delay);
 	fprintf(stderr, 'maximum outstanding requests: %d\n', args.ml_maxrqs);
 	fprintf(stderr, 'environment:\n');
 	for (key in process.env) {
-		if (key.substr(0, 'MANTA_'.length) != 'MANTA_')
+		if (key.substr(0, 'MANTA_'.length) !== 'MANTA_')
 			continue;
 
 		fprintf(stderr, '    %7s = %s\n', key, process.env[key]);
 	}
 
+	var multiplier = 15;
 	this.mlt_requests = [];
-	args.ml_paths.forEach(function (basepath) {
-		var paths;
 
-		paths = makePathList(basepath, args.ml_nshards);
-		paths.forEach(function (p) {
+	/*
+	 * Our goal is to make sure that our load hits every metadata shard,
+	 * but we have no way to control this or even see which shards our
+	 * paths are hitting, so our only option is to use enough different
+	 * paths as to make it extremely unlikely that a given shard is
+	 * uncovered.  Shards are effectively independently randomized based on
+	 * the path in directory manta or the object name in buckets manta, so
+	 * the odds of N paths *not* covering a given shard are
+	 * ((nshards - 1) / nshards)^N.
+	 *
+	 * This is completely unfounded, but we're just going to use 15 paths
+	 * or objects per shard. For 3 shards (as deployed in production), the
+	 * odds of each shard not being hit are 0.23%, so the odds of any shard
+	 * not being hit are still quite low.
+	 * */
+	for (var i = 0; i < args.ml_nshards * multiplier; i++) {
+		var name =  'mlive_' + i;
+
+		args.ml_paths.forEach(function (basepath) {
+			var readObj = {
+				kind: 'read',
+				path: sprintf('%s/%s', basepath, name)
+
+			};
+			var writeObj = {
+				kind: 'write',
+				path: sprintf('%s/%s', basepath, name)
+			};
+
 			if (args.ml_reads) {
-				self.mlt_requests.push({
-				    'path': p,
-				    'kind': 'read'
-				});
+				self.mlt_requests.push(readObj);
 			}
-
 			if (args.ml_writes) {
-				self.mlt_requests.push({
-				    'path': p,
-				    'kind': 'write'
-				});
+				self.mlt_requests.push(writeObj);
 			}
 		});
-	});
 
-	this.initPaths(function () {
-		self.mlt_tick = setInterval(
-		    function () { self.tick(); }, args.ml_delay);
-		self.mlt_report = setInterval(
-		    function () { self.report(); }, 1000);
+		args.ml_buckets.forEach(function (bucket) {
+			var readObj = {
+				kind: 'read',
+				bucket: bucket,
+				object: name
+
+			};
+			var writeObj = {
+				kind: 'write',
+				bucket: bucket,
+				object: name
+			};
+
+			if (args.ml_reads) {
+				self.mlt_requests.push(readObj);
+			}
+			if (args.ml_writes) {
+				self.mlt_requests.push(writeObj);
+			}
+		});
+	}
+
+	this.initPaths(function (err) {
+		if (err) {
+			fatal(err);
+		}
+
+		self.mlt_tick = setInterval(function () {
+			self.tick();
+		}, args.ml_delay);
+
+		self.mlt_report = setInterval(function () {
+			self.report();
+		}, 1000);
+
+		var finished = new Date();
+		var delta = finished - started;
+		var secs = delta / 1000;
+		fprintf(stderr, 'took %ss to initialize\n', secs);
 	});
 };
 
@@ -348,52 +497,82 @@ LivenessTester.prototype.initPaths = function (callback)
 	var stderr = this.mlt_args.ml_error;
 
 	if (this.mlt_args.ml_skipsetup) {
-		fprintf(stderr, 'skipping directory tree setup\n');
+		fprintf(stderr, 'skipping initial setup\n');
 		setImmediate(callback);
 		return;
 	}
 
-	fprintf(stderr, 'creating test directory tree ... ');
-	mod_vasync.forEachPipeline({
-	    'inputs': this.mlt_requests.filter(function (rq) {
+	var q = mod_vasync.queue(function (rq, cb) {
+		if (rq.bucket) {
+			self.ensureBucketObject(rq.bucket, rq.object, done);
+		} else {
+			var p = sprintf('%s/obj', rq.path);
+			self.ensureDirectoryObject(p, done);
+		}
+
+		function done(err) {
+			if (err) {
+				fatal(err);
+			}
+
+			cb();
+		}
+	}, INIT_CONCURRENCY);
+
+	var inputs = this.mlt_requests.filter(function (rq) {
 		/*
 		 * This assumes we have a read for every write.  If we make this
 		 * flexible, we should make sure this accounts for that.
 		 * (Writes only need to ensure that the parent directory
 		 * exists.)
 		 */
-		return (rq.kind == 'read');
-	    }),
-	    'func': function doEnsureObject(rq, subcallback) {
-		self.ensureObject(sprintf('%s/obj', rq.path), subcallback);
-	    }
-	}, function (err) {
-		if (err) {
-			fprintf(stderr, 'failed (%s)\n', err.message);
-			setTimeout(function () {
-				self.initPaths(callback);
-			}, 1000);
-			return;
-		}
+		return (rq.kind === 'read');
+	});
 
-		fprintf(stderr, 'done.\n');
+	var numDone = 0;
+	var numTodo = inputs.length;
+
+	updateStatusLine();
+	q.push(inputs, function doneOne() {
+		numDone++;
+		updateStatusLine();
+	});
+	q.close();
+
+	function updateStatusLine() {
+		fprintf(stderr, 'creating test tree ... (%d/%d)\r', numDone, numTodo);
+	}
+
+	q.once('end', function () {
+		fprintf(stderr, '\ndone.\n');
 		callback();
 	});
 };
 
-LivenessTester.prototype.ensureObject = function (path, callback)
+LivenessTester.prototype.ensureBucketObject = function (bucket, object, callback)
 {
-	var manta;
+	var manta = this.mlt_manta;
+	var stream = new mod_manta.StringStream('example contents');
 
-	manta = this.mlt_manta;
+	this.mlt_args.ml_log.debug('ensuring bucket %j object %j', bucket, object);
+
+	manta.createBucketObject(stream, bucket, object, callback);
+};
+
+LivenessTester.prototype.ensureDirectoryObject = function (path, callback)
+{
+	var manta = this.mlt_manta;
+
+	this.mlt_args.ml_log.debug('ensuring path %j', path);
+
 	mod_vasync.waterfall([
 	    function doCheckDir(subcallback) {
 		var dir = mod_path.dirname(path);
-		manta.mkdirp(dir, function (err) { subcallback(err); });
+		manta.mkdirp(dir, subcallback);
 	    },
 	    function doPut(subcallback) {
 		var stream = new mod_manta.StringStream('example contents');
-		manta.put(path, stream, function (err) { subcallback(err); });
+		manta.put(path, stream, subcallback);
 	    }
 	], callback);
 };
@@ -408,7 +587,7 @@ LivenessTester.prototype.tick = function ()
 	var rq, method, rqargs;
 
 	mod_assertplus.ok(this.mlt_noutstanding <= args.ml_maxrqs);
-	if (this.mlt_noutstanding == args.ml_maxrqs) {
+	if (this.mlt_noutstanding === args.ml_maxrqs) {
 		if (this.mlt_corked === null) {
 			this.mlt_corked = new Date();
 		}
@@ -420,19 +599,33 @@ LivenessTester.prototype.tick = function ()
 	this.mlt_noutstanding++;
 	rq = this.mlt_requests[this.mlt_which++];
 	this.mlt_which %= this.mlt_requests.length;
-	rqargs = [ sprintf('%s/%s', rq.path, 'obj') ];
+	rqargs = [];
 
-	if (rq.kind == 'read') {
-		method = this.mlt_manta.get;
+	if (rq.bucket) {
+		if (rq.kind === 'read') {
+			method = this.mlt_manta.getBucketObject;
+		} else {
+			method = this.mlt_manta.createBucketObject;
+			rqargs.push(new mod_manta.StringStream('test contents'));
+		}
+
+		rqargs.push(rq.bucket, rq.object);
+
 	} else {
-		method = this.mlt_manta.put;
-		rqargs.push(new mod_manta.StringStream('test contents'));
+		rqargs.push(sprintf('%s/%s', rq.path, 'obj'));
+
+		if (rq.kind === 'read') {
+			method = this.mlt_manta.get;
+		} else {
+			method = this.mlt_manta.put;
+			rqargs.push(new mod_manta.StringStream('test contents'));
+		}
 	}
 
 	rqargs.push(function (err, stream) {
 		var stats;
 
-		if (rq.kind == 'read') {
+		if (rq.kind === 'read') {
 			if (!err)
 				/* Don't let data accumulate. */
 				stream.on('data', function () {});
@@ -452,6 +645,8 @@ LivenessTester.prototype.tick = function ()
 		self.mlt_noutstanding--;
 	});
 
+	this.mlt_args.ml_log.trace({method: method.name, rqargs: rqargs},
+	    'calling tick method');
 	method.apply(this.mlt_manta, rqargs);
 };
 
@@ -472,10 +667,10 @@ LivenessTester.prototype.report = function ()
 		force = now.getTime() - this.mlt_state_last.getTime() >
 		    this.mlt_args.ml_report_time;
 
-		if (force || this.mlt_state_read != readstate ||
-		    this.mlt_state_write != writestate) {
+		if (force || this.mlt_state_read !== readstate ||
+		    this.mlt_state_write !== writestate) {
 
-			if (readstate == writestate) {
+			if (readstate === writestate) {
 				events.push(sprintf('all %s', readstate));
 			} else {
 				events.push(sprintf('read %s', readstate));
@@ -557,30 +752,5 @@ LivenessStats.prototype.state = function ()
 
 	return (state);
 };
-
-
-/*
- * Our goal is to make sure that our load hits every metadata shard, but we have
- * no way to control this or even see which shards our paths are hitting, so our
- * only option is to use enough different paths as to make it extremely unlikely
- * that a given shard is uncovered.  Shards are effectively independently
- * randomized based on the path, so the odds of N paths *not* covering a given
- * shard are ((nshards - 1) / nshards)^N.
- *
- * This is completely unfounded, but we're just going to use 15 paths per shard.
- * For 3 shards (as deployed in production), the odds of each shard not being
- * hit are 0.23%, so the odds of any shard not being hit are still quite low.
- */
-function makePathList(basepath, nshards)
-{
-	var rv, i;
-	var multiplier = 15;
-
-	rv = new Array(nshards * multiplier);
-	for (i = 0; i < nshards * multiplier; i++)
-		rv[i] = sprintf('/%s/mlive_%d', basepath, i);
-
-	return (rv);
-}
 
 main();
